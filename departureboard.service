@@ -1,0 +1,18 @@
+
+[Unit]
+Description=Local Departure Board (SBB/ZVV) on TFT
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/sha/pi_departures
+ExecStart=/usr/bin/python3 /home/sha/pi_departures/board_fb.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+
+
