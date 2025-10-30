@@ -6,13 +6,25 @@ from PIL import Image, ImageDraw, ImageFont
 # ---------------- Config ----------------
 # City bus stop in front of the house
 BUS_STATION = "Winterthur, Else Züblin"
+
 # Train station behind the house
-TRAIN_STATION = "Winterthur Hegi (SBB)"
+TRAIN_STATION = "Winterthur Hegi"
+
 # We only care about trains heading toward the main station
-TARGET_DESTINATION = "Winterthur, Hauptbahnhof"
+FILTER_BUS = "Elsau, Melcher"
+FILTER_TRAIN = "Wil SG"
+
+# Debugging for train request
+DEBUG_TRAINS = False
+DEBUG_TRAIN_LIMIT_PRINT = 5
+
 # Display dimensions - Portrait orientation (320x480)
 DISPLAY_WIDTH, DISPLAY_HEIGHT = 320, 480  # Portrait orientation
-LIMIT = 12
+
+# Number of departures to fetch and display
+LIMIT = 8
+
+# Refresh interval in seconds
 REFRESH_SECS = 30
 
 # Framebuffer device to use
@@ -135,52 +147,59 @@ def _format_departure_item(it, now_utc):
         "_epoch": dep.timestamp(),
     }
 
-def fetch_bus_departures(station, limit):
-    r = requests.get(
-        "https://transport.opendata.ch/v1/stationboard",
-        params={"station": station, "limit": limit} # , "transportations[]": ["bus"]},
-        timeout=8,
-    )
-    r.raise_for_status()
-    data = r.json()
-    now_utc = datetime.now(timezone.utc)
-    out = []
-    for it in data.get("stationboard", []):
-        item = _format_departure_item(it, now_utc)
-        if not item:
-            continue
-        # Keep only bus-like items (defensive; API should already filter)
-        cat_u = (item["cat"] or "").upper()
-        name_u = (item["line"] or "").upper()
-        if cat_u in ("BUS", "N", "SN") or (name_u and name_u[0:1].isdigit()):
-            out.append(item)
-    return out
+def fetch_departures(station, limit):
+    url = "https://transport.opendata.ch/v1/stationboard"
+    params = {"station": station, "limit": limit, "transportations[]": ["bus"]}
 
-def fetch_train_departures_towards(station, limit, target_destination):
-    r = requests.get(
-        "https://transport.opendata.ch/v1/stationboard",
-        params={"station": station, "limit": limit},
-        timeout=8,
-    )
+    # If this is the train station call, request all modes (remove bus filter) and debug-print URL
+    if station == TRAIN_STATION:
+        params = {"station": station, "limit": limit}
+        if DEBUG_TRAINS:
+            try:
+                prepped = requests.Request("GET", url, params=params).prepare()
+                print(f"[DEBUG] Train request URL: {prepped.url}")
+            except Exception as _e:
+                print(f"[DEBUG] Could not prepare train URL: {_e}")
+
+    r = requests.get(url, params=params, timeout=8)
     r.raise_for_status()
     data = r.json()
     now_utc = datetime.now(timezone.utc)
     out = []
     for it in data.get("stationboard", []):
-        # Filter by direction to main station
-        # if (it.get("to") or "") != target_destination:
-        #    continue
         item = _format_departure_item(it, now_utc)
         if not item:
             continue
+        # Direction filters per station (case-insensitive substring match)
+        if station == BUS_STATION and FILTER_BUS:
+            try:
+                if FILTER_BUS.lower() in (item.get("to") or "").lower():
+                    continue
+            except Exception:
+                pass
+        if station == TRAIN_STATION and FILTER_TRAIN:
+            try:
+                if FILTER_TRAIN.lower() in (item.get("to") or "").lower():
+                    continue
+            except Exception:
+                pass
         out.append(item)
+
+    # Extra train-side debug: summarize what we got from the train station
+    if station == TRAIN_STATION and DEBUG_TRAINS:
+        print(f"[DEBUG] Train results from '{station}': {len(out)} departures")
+        for e in out[:DEBUG_TRAIN_LIMIT_PRINT]:
+            print(f"[DEBUG]  {e['time']}  {e['cat']:<3} {e['line']:<6} → {e['to']}  delay:+{e['delay']}")
     return out
 
-def fetch_mixed_departures(bus_station, train_station, limit, target_destination):
+def fetch_mixed_departures(bus_station, train_station, limit):
     # Fetch bus and train lists independently and then merge-sort by departure time
-    bus = fetch_bus_departures(bus_station, limit)
-    trains = fetch_train_departures_towards(train_station, limit, target_destination)
-    merged = sorted(bus + trains, key=lambda e: e.get("_epoch", float("inf")))
+    bus = fetch_departures(bus_station, limit)
+    trains = fetch_departures(train_station, limit)
+    if DEBUG_TRAINS:
+        print(f"[DEBUG] Buses fetched: {len(bus)}  from '{bus_station}'")
+        print(f"[DEBUG] Trains fetched: {len(trains)} from '{train_station}'")
+    merged = sorted(trains + bus, key=lambda e: e.get("_epoch", float("inf")))
     # Trim to limit and drop helper keys
     trimmed = []
     for e in merged[:limit]:
@@ -329,7 +348,7 @@ def main():
             now = time.time()
             if now - last > REFRESH_SECS or not entries:
                 try:
-                    entries = fetch_mixed_departures(BUS_STATION, TRAIN_STATION, LIMIT, TARGET_DESTINATION)
+                    entries = fetch_mixed_departures(BUS_STATION, TRAIN_STATION, LIMIT)
                     print(f"Fetched {len(entries)} departures")
                 except Exception as e:
                     print(f"API Error: {e}")
