@@ -59,9 +59,6 @@ FONT_REG, FONT_REG_NAME = _load_font(12)
 FONT_MED, FONT_MED_NAME = _load_font(15)
 FONT_BIG, FONT_BIG_NAME = _load_font(18)
 
-# No rotation needed - we'll work directly in portrait mode
-ROTATE_IF_LANDSCAPE = 0
-
 # Framebuffer color format - try different combinations to get correct colors:
 # BGR565: True = BGR565 (B-G-R), False = RGB565 (R-G-B)
 # USE_BYTESWAP: True = swap bytes (big-endian), False = native (little-endian)
@@ -340,7 +337,7 @@ def draw_frame(entries, tick, width=None, height=None):
     nowtxt = datetime.now().strftime("%H:%M:%S")
     title = f"Abfahrten – Solarstrasse"
     draw_text_solid(img, (12, 12), title, FONT_BIG, WHITE)
-    tw, th = text_size(d, nowtxt, FONT_MED)
+    tw, _ = text_size(d, nowtxt, FONT_MED)
     draw_text_solid(img, (img_width-12-tw, 14), nowtxt, FONT_MED, GREY)
 
     # Column headers (Portrait)
@@ -364,7 +361,6 @@ def draw_frame(entries, tick, width=None, height=None):
         # Line badge
         lc = line_color(e["cat"], e["line"])
         d.rounded_rectangle((65, y-24, 115, y+2), radius=6, fill=lc)
-        # d.text((70, y-22), e["line"][:3], font=FONT_MED, fill=(0,0,0))
         
         # Time + delay color
         col = WHITE if e["delay"]<=0 else (ORANGE_COLOR if e["delay"]<6 else RED)
