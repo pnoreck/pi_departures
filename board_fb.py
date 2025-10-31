@@ -30,16 +30,48 @@ REFRESH_SECS = 30
 # Framebuffer device to use
 FRAMEBUFFER_DEVICE = "/dev/fb1"  # Change to /dev/fb0, /dev/fb1, etc. as needed
 
-# Font sizes for portrait display
-FONT_REG = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
-FONT_MED = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 15)
-FONT_BIG = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
+# Font setup with crisp candidates and environment override
+def _load_font(size):
+    env_font = os.getenv("BOARD_FONT")
+    candidates = [
+        env_font,
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    for path in candidates:
+        if not path:
+            continue
+        try:
+            font = ImageFont.truetype(path, size)
+            return font, path
+        except Exception:
+            continue
+    # Fallback to PIL default bitmap font
+    try:
+        return ImageFont.load_default(), "PIL:default"
+    except Exception:
+        # Last resort: re-raise to fail fast
+        raise
+
+FONT_REG, FONT_REG_NAME = _load_font(12)
+FONT_MED, FONT_MED_NAME = _load_font(15)
+FONT_BIG, FONT_BIG_NAME = _load_font(18)
 
 # No rotation needed - we'll work directly in portrait mode
 ROTATE_IF_LANDSCAPE = 0
 
-# Try setting this to True if colors look wrong or you see "broken icons"
-BGR565 = True  # Changed to True to fix violet/green color distortion
+# Framebuffer color format - try different combinations to get correct colors:
+# BGR565: True = BGR565 (B-G-R), False = RGB565 (R-G-B)
+# USE_BYTESWAP: True = swap bytes (big-endian), False = native (little-endian)
+# Test combinations:
+#   1. BGR565=True, USE_BYTESWAP=True  (original - was light blue/violet)
+#   2. BGR565=False, USE_BYTESWAP=False (was light brown)
+#   3. BGR565=False, USE_BYTESWAP=True  (testing now)
+#   4. BGR565=True, USE_BYTESWAP=False (try if 3 doesn't work)
+BGR565 = True
+USE_BYTESWAP = True  # Try with byteswap - we're close with BGR565
 
 # Optional: draw a one-time test pattern on first frame to verify visibility
 DRAW_TEST_PATTERN_ONCE = False
@@ -55,7 +87,19 @@ def get_fbinfo(fd):
     fcntl.ioctl(fd, FBIOGET_VSCREENINFO, buf, True)
     xres, yres = struct.unpack_from("<II", buf, 0)
     bpp = struct.unpack_from("<I", buf, 32)[0]
-    return {"xres": xres, "yres": yres, "bpp": bpp}
+    # Read color format offsets and lengths (at offsets 36, 40, 44, 48, 52, 56, 60, 64)
+    red_offset = struct.unpack_from("<I", buf, 36)[0]
+    red_length = struct.unpack_from("<I", buf, 40)[0]
+    green_offset = struct.unpack_from("<I", buf, 44)[0]
+    green_length = struct.unpack_from("<I", buf, 48)[0]
+    blue_offset = struct.unpack_from("<I", buf, 52)[0]
+    blue_length = struct.unpack_from("<I", buf, 56)[0]
+    return {
+        "xres": xres, "yres": yres, "bpp": bpp,
+        "red_offset": red_offset, "red_length": red_length,
+        "green_offset": green_offset, "green_length": green_length,
+        "blue_offset": blue_offset, "blue_length": blue_length,
+    }
 
 def get_stride_default(xres):
     # Fallback: 2 Bytes pro Pixel
@@ -93,6 +137,52 @@ def text_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFon
     l, t, r, b = draw.textbbox((0, 0), text, font=font)
     return r - l
 
+def draw_text_solid(img: Image.Image, position, text: str, font: ImageFont.FreeTypeFont, fill):
+    """Draw text as solid-colored glyphs using a monochrome mask to avoid color fringing on RGB565.
+    
+    Disables anti-aliasing by rendering at high resolution, thresholding to pure black/white,
+    then scaling down with nearest neighbor for maximum sharpness on RGB565 displays.
+    """
+    # Measure text to size mask tightly
+    tmp_draw = ImageDraw.Draw(img)
+    l, t, r, b = tmp_draw.textbbox((0, 0), text, font=font)
+    w, h = max(1, r - l), max(1, b - t)
+    w, h = int(w), int(h)
+    
+    # Render at 3x resolution to get better glyph shape, then threshold to remove anti-aliasing
+    scale = 3
+    w_hires, h_hires = w * scale, h * scale
+    mask_hires = Image.new("L", (w_hires, h_hires), 0)
+    md_hires = ImageDraw.Draw(mask_hires)
+    
+    # Create high-resolution font
+    try:
+        if hasattr(font, 'path') and font.path:
+            font_hires = ImageFont.truetype(font.path, int(font.size * scale))
+        else:
+            font_hires = font
+    except:
+        font_hires = font
+    
+    # Render text at high resolution
+    text_x_hires, text_y_hires = int((-l) * scale), int((-t) * scale)
+    md_hires.text((text_x_hires, text_y_hires), text, font=font_hires, fill=255)
+    
+    # Threshold to pure black/white (removes anti-aliasing gray pixels)
+    # Any pixel >= 128 becomes 255 (fully opaque), < 128 becomes 0 (fully transparent)
+    import numpy as np
+    mask_array = np.asarray(mask_hires, dtype=np.uint8)
+    mask_array = np.where(mask_array >= 128, 255, 0).astype(np.uint8)
+    mask_hires = Image.fromarray(mask_array, mode='L')
+    
+    # Scale down using nearest neighbor to preserve sharp edges (no blur)
+    mask = mask_hires.resize((w, h), resample=Image.NEAREST)
+    
+    x, y = position
+    x, y = int(x), int(y)
+    # Paste solid color through mask for crisp edges without colored halos
+    img.paste(fill, (x, y, x + w, y + h), mask)
+
 def rgb888_to_rgb565(img: Image.Image) -> bytes:
     import numpy as np
     arr = np.asarray(img, dtype=np.uint8)
@@ -103,24 +193,37 @@ def rgb888_to_rgb565(img: Image.Image) -> bytes:
         rgb565 = (b << 11) | (g << 5) | r
     else:
         rgb565 = (r << 11) | (g << 5) | b
-    return rgb565.byteswap().tobytes()
+    # Framebuffer byte order - configurable via USE_BYTESWAP
+    if USE_BYTESWAP:
+        return rgb565.byteswap().tobytes()  # Big-endian
+    else:
+        return rgb565.astype('<u2').tobytes()  # Little-endian (native)
 
 def line_color(cat, name):
+    # Adobe Color palette: #025259, #007172, #F29325, #D94F04, #F4E2DE
+    DARK_TEAL=(2,82,89)       # #025259
+    TEAL=(0,113,114)          # #007172
+    ORANGE=(242,147,37)       # #F29325
+    RED_ORANGE=(217,79,4)     # #D94F04
+    LIGHT_BEIGE=(244,226,222) # #F4E2DE
+    
     c = (cat or "").upper(); n = (name or "").upper()
 
-    # S-Bahn
-    if c.startswith("S") or n.startswith("S"): return (65,120,255)
+    # S-Bahn - use orange
+    if c.startswith("S") or n.startswith("S"): return ORANGE
 
-    # Tram
-    if c in ("TRAM", "T"):                  return (0,170,170)
+    # Tram - use teal
+    if c in ("TRAM", "T"): return TEAL
 
-    # Bus/Nachtbus
+    # Bus/Nachtbus - use red-orange
     if c in ("BUS","N","SN") or (n and n[0].isdigit()):
-        return (60,160,220)
+        return RED_ORANGE
 
-    # Fernverkehr
-    if c in ("IC","IR","RE","RJ","RJX","EN"): return (60,200,120)
-    return (130,130,130)
+    # Fernverkehr - use light beige
+    if c in ("IC","IR","RE","RJ","RJX","EN"): return LIGHT_BEIGE
+    
+    # Default - use dark teal
+    return DARK_TEAL
 
 def _format_departure_item(it, now_utc):
     stop = it.get("stop", {})
@@ -210,8 +313,21 @@ def fetch_mixed_departures(bus_station, train_station, limit):
 # -------------- rendering ----------------
 
 def draw_frame(entries, tick, width=None, height=None):
-    BLACK=(0,0,0); WHITE=(255,255,255); GREY=(170,170,170)
-    DARKBG=(12,12,14); ORANGE=(245,160,20); RED=(220,60,60)
+    # Adobe Color palette
+    # #025259, #007172, #F29325, #D94F04, #F4E2DE
+    DARK_TEAL=(2,82,89)      # #025259 - main background
+    TEAL=(0,113,114)         # #007172 - accents/secondary
+    ORANGE=(242,147,37)      # #F29325 - warnings/delays
+    RED_ORANGE=(217,79,4)    # #D94F04 - severe delays
+    LIGHT_BEIGE=(244,226,222) # #F4E2DE - text and highlights
+    
+    # Map to semantic names
+    BLACK=DARK_TEAL           # Background
+    WHITE=LIGHT_BEIGE         # Primary text
+    GREY=TEAL                 # Secondary text
+    DARKBG=TEAL               # Alternating rows (darker)
+    ORANGE_COLOR=ORANGE       # Delays < 6 min
+    RED=RED_ORANGE            # Delays >= 6 min
 
     # Use provided dimensions or fall back to default
     img_width = width or DISPLAY_WIDTH
@@ -223,17 +339,17 @@ def draw_frame(entries, tick, width=None, height=None):
     # Header (Portrait)
     nowtxt = datetime.now().strftime("%H:%M:%S")
     title = f"Abfahrten – Solarstrasse"
-    d.text((12, 12), title, font=FONT_BIG, fill=WHITE)
+    draw_text_solid(img, (12, 12), title, FONT_BIG, WHITE)
     tw, th = text_size(d, nowtxt, FONT_MED)
-    d.text((img_width-12-tw, 14), nowtxt, font=FONT_MED, fill=GREY)
+    draw_text_solid(img, (img_width-12-tw, 14), nowtxt, FONT_MED, GREY)
 
     # Column headers (Portrait)
     y = 50
     d.line((10, y, img_width-10, y), fill=GREY)
-    d.text((14, 30), "Ab", font=FONT_MED, fill=GREY)
-    d.text((70, 30), "Linie", font=FONT_MED, fill=GREY)
-    d.text((120, 30), "Ziel", font=FONT_MED, fill=GREY)
-    d.text((img_width-50, 30), "min", font=FONT_MED, fill=GREY)
+    draw_text_solid(img, (14, 30), "Ab", FONT_MED, GREY)
+    draw_text_solid(img, (70, 30), "Linie", FONT_MED, GREY)
+    draw_text_solid(img, (120, 30), "Ziel", FONT_MED, GREY)
+    draw_text_solid(img, (img_width-50, 30), "min", FONT_MED, GREY)
 
     row_h = 36  # Increased row height to prevent text overlap
     y += 12
@@ -248,13 +364,13 @@ def draw_frame(entries, tick, width=None, height=None):
         # Line badge
         lc = line_color(e["cat"], e["line"])
         d.rounded_rectangle((65, y-24, 115, y+2), radius=6, fill=lc)
-        d.text((70, y-22), e["line"][:3], font=FONT_MED, fill=(0,0,0))
+        # d.text((70, y-22), e["line"][:3], font=FONT_MED, fill=(0,0,0))
         
         # Time + delay color
-        col = WHITE if e["delay"]<=0 else (ORANGE if e["delay"]<6 else RED)
-        d.text((12, y-22), e["time"], font=FONT_BIG, fill=col)
+        col = WHITE if e["delay"]<=0 else (ORANGE_COLOR if e["delay"]<6 else RED)
+        draw_text_solid(img, (12, y-22), e["time"], FONT_BIG, col)
         if e["delay"]>0:
-            d.text((45, y-20), f"+{e['delay']}", font=FONT_MED, fill=col)
+            draw_text_solid(img, (70, y-20), f"+{e['delay']}", FONT_MED, col)
         
         # Destination (truncate)
         to = e["to"]
@@ -263,7 +379,7 @@ def draw_frame(entries, tick, width=None, height=None):
             to = to[:-1]
         if text_width(d, to, FONT_MED) > maxw:
             to = to[:-1] + "…"
-        d.text((120, y-22), to, font=FONT_MED, fill=WHITE)
+        draw_text_solid(img, (120, y-22), to, FONT_MED, WHITE)
         
         # Countdown
         if e["mins"] == 0:
@@ -271,7 +387,7 @@ def draw_frame(entries, tick, width=None, height=None):
         else:
             sep = ":" if tick else " "
             txt = f"{e['mins']}{sep}{e['secs']:02d}"
-        d.text((img_width-48, y-22), txt, font=FONT_BIG, fill=WHITE)
+        draw_text_solid(img, (img_width-50, y-22), txt, FONT_BIG, WHITE)
 
     return img
 
@@ -305,17 +421,64 @@ def main():
             print(f"Will stop after {max_frames} frames")
     
     if framebuffer_mode:
+        # Declare global variables at the start before any use
+        global BGR565, USE_BYTESWAP
+        
         info = get_fbinfo(fb)
         xres, yres, bpp = info["xres"], info["yres"], info["bpp"]
         
         print(f"Framebuffer info: {xres}x{yres}, {bpp} bpp")
         print(f"Expected display: {DISPLAY_WIDTH}x{DISPLAY_HEIGHT}")
         
-        if bpp != 16:
-            print(f"Warning: bpp = {bpp} (expected 16/RGB565)")
-
+        # Print color format info to help diagnose
+        red_off = info.get("red_offset", 0)
+        red_len = info.get("red_length", 0)
+        green_off = info.get("green_offset", 0)
+        green_len = info.get("green_length", 0)
+        blue_off = info.get("blue_offset", 0)
+        blue_len = info.get("blue_length", 0)
+        print(f"Color format: R offset={red_off} len={red_len}, G offset={green_off} len={green_len}, B offset={blue_off} len={blue_len}")
+        
+        # Auto-detect RGB565 vs BGR565 based on offsets
+        # RGB565: R at bit 11, G at bit 5, B at bit 0
+        # BGR565: B at bit 11, G at bit 5, R at bit 0
+        auto_bgr565 = None
+        if red_off == 11 and blue_off == 0:
+            auto_bgr565 = False
+            print("Detected RGB565 format (R=11, G=5, B=0)")
+        elif blue_off == 11 and red_off == 0:
+            auto_bgr565 = True
+            print("Detected BGR565 format (B=11, G=5, R=0)")
+        else:
+            print(f"Unknown format (R={red_off}, G={green_off}, B={blue_off}) - using manual BGR565={BGR565}")
+        
+        # Use auto-detected format if available, otherwise use manual setting
+        # NOTE: Auto-detection may fail due to structure layout - using tested values
+        # From testing: BGR565=True, USE_BYTESWAP=False gave light green (closest to dark teal)
+        if auto_bgr565 is not None and red_len > 0 and blue_len > 0:
+            print(f"Auto-detected format: Using BGR565={auto_bgr565}")
+            BGR565 = auto_bgr565
+            USE_BYTESWAP = False  # Based on testing, this gives best results
+            print(f"Using byte swap: {USE_BYTESWAP}")
+        else:
+            # Use tested values that work best
+            print("Auto-detection unreliable, using tested values: BGR565=True, USE_BYTESWAP=False")
+            BGR565 = True
+            USE_BYTESWAP = False  # This gave light green (closest to dark teal)
+        
         stride = get_stride_sysfs() or get_stride_default(xres)
         print(f"Stride: {stride} (expected: {xres * 2})")
+        
+        # Validate bpp vs stride - if stride suggests 16 bpp, trust that over reported bpp
+        inferred_bpp = (stride // xres) * 8
+        if bpp != 16:
+            print(f"Warning: bpp = {bpp} (expected 16/RGB565)")
+            if inferred_bpp == 16:
+                print(f"Note: Stride indicates {inferred_bpp} bpp - will use 16 bpp RGB565 format")
+                bpp = 16  # Override with stride-based detection
+            else:
+                print(f"Warning: Inferred bpp from stride is {inferred_bpp}, mismatch may cause display issues")
+        print(f"Fonts: REG='{FONT_REG_NAME}', MED='{FONT_MED_NAME}', BIG='{FONT_BIG_NAME}'")
         
         # Use native framebuffer dimensions; rotate if landscape to fill screen
         fb_is_landscape = xres >= yres
@@ -337,6 +500,7 @@ def main():
         # Image output mode - use display dimensions directly
         actual_width, actual_height = DISPLAY_WIDTH, DISPLAY_HEIGHT
         print(f"Using display dimensions: {actual_width}x{actual_height}")
+        print(f"Fonts: REG='{FONT_REG_NAME}', MED='{FONT_MED_NAME}', BIG='{FONT_BIG_NAME}'")
 
     entries = []
     last = 0
@@ -354,12 +518,12 @@ def main():
                     print(f"API Error: {e}")
                     img = Image.new("RGB", (actual_width, actual_height), (0,0,0))
                     d = ImageDraw.Draw(img)
-                    d.text((12, 12), f"API-Fehler: {e}", font=FONT_REG, fill=(220,60,60))
+                    draw_text_solid(img, (12, 12), f"API-Fehler: {e}", FONT_REG, (220,60,60))
                     
                     if framebuffer_mode:
                         # Scale if needed to match framebuffer dimensions
                         if (xres, yres) != (actual_width, actual_height):
-                            img = img.resize((xres, yres))
+                            img = img.resize((xres, yres), resample=Image.LANCZOS)
                         
                         out_bytes = rgb888_to_rgb565(img)
                         # Write to framebuffer with proper stride handling
@@ -389,17 +553,18 @@ def main():
                     x0 = i * bar_w
                     td.rectangle((x0, 0, min(actual_width-1, x0 + bar_w - 1), actual_height-1), fill=c)
                 td.line((0,0, actual_width-1, actual_height-1), fill=(0,0,0), width=5)
-                td.text((10,10), "TEST", font=FONT_BIG, fill=(0,0,0))
+                draw_text_solid(tp, (10,10), "TEST", FONT_BIG, (0,0,0))
                 frame = tp
             
             if framebuffer_mode:
                 # Rotate to match landscape framebuffer if needed
                 if 'fb_is_landscape' in locals() and fb_is_landscape:
-                    # Rotate so portrait render fills landscape fb
-                    frame = frame.rotate(LANDSCAPE_ROTATE_DEG, expand=True)
-                # Ensure exact fb size
+                    # Rotate so portrait render fills landscape fb - use LANCZOS for better quality
+                    frame = frame.rotate(LANDSCAPE_ROTATE_DEG, expand=False, resample=Image.LANCZOS)
+                # Ensure exact fb size - use LANCZOS for scaling, NEAREST only if exact size match
                 if frame.size != (xres, yres):
-                    frame = frame.resize((xres, yres))
+                    print(f"Image needed to be resized: {xres}x{yres}")
+                    frame = frame.resize((xres, yres), resample=Image.LANCZOS)
                 
                 out_bytes = rgb888_to_rgb565(frame)
                 
