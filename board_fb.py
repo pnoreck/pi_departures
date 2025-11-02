@@ -14,18 +14,14 @@ TRAIN_STATION = "Winterthur Hegi"
 FILTER_BUS = "Elsau, Melcher"
 FILTER_TRAIN = "Wil SG"
 
-# Debugging for train request
-DEBUG_TRAINS = False
-DEBUG_TRAIN_LIMIT_PRINT = 5
-
 # Display dimensions - Portrait orientation (320x480)
 DISPLAY_WIDTH, DISPLAY_HEIGHT = 320, 480  # Portrait orientation
 
 # Number of departures to fetch and display
-LIMIT = 8
+LIMIT = 10
 
 # Refresh interval in seconds
-REFRESH_SECS = 30
+REFRESH_SECS = 60
 
 # Framebuffer device to use
 FRAMEBUFFER_DEVICE = "/dev/fb1"  # Change to /dev/fb0, /dev/fb1, etc. as needed
@@ -35,10 +31,13 @@ def _load_font(size):
     env_font = os.getenv("BOARD_FONT")
     candidates = [
         env_font,
+        #"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        #"/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        #"/usr/share/fonts/truetype/noto/NotoSans-BoldItalic.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        #"/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        #"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        #"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
     for path in candidates:
         if not path:
@@ -69,9 +68,6 @@ FONT_BIG, FONT_BIG_NAME = _load_font(18)
 #   4. BGR565=True, USE_BYTESWAP=False (try if 3 doesn't work)
 BGR565 = True
 USE_BYTESWAP = True  # Try with byteswap - we're close with BGR565
-
-# Optional: draw a one-time test pattern on first frame to verify visibility
-DRAW_TEST_PATTERN_ONCE = False
 
 # Rotation direction when framebuffer is landscape: -90 (clockwise) or +90 (counter-clockwise)
 LANDSCAPE_ROTATE_DEG = -90
@@ -147,7 +143,7 @@ def draw_text_solid(img: Image.Image, position, text: str, font: ImageFont.FreeT
     w, h = int(w), int(h)
     
     # Render at 3x resolution to get better glyph shape, then threshold to remove anti-aliasing
-    scale = 3
+    scale = 1
     w_hires, h_hires = w * scale, h * scale
     mask_hires = Image.new("L", (w_hires, h_hires), 0)
     md_hires = ImageDraw.Draw(mask_hires)
@@ -254,12 +250,6 @@ def fetch_departures(station, limit):
     # If this is the train station call, request all modes (remove bus filter) and debug-print URL
     if station == TRAIN_STATION:
         params = {"station": station, "limit": limit}
-        if DEBUG_TRAINS:
-            try:
-                prepped = requests.Request("GET", url, params=params).prepare()
-                print(f"[DEBUG] Train request URL: {prepped.url}")
-            except Exception as _e:
-                print(f"[DEBUG] Could not prepare train URL: {_e}")
 
     r = requests.get(url, params=params, timeout=8)
     r.raise_for_status()
@@ -285,20 +275,12 @@ def fetch_departures(station, limit):
                 pass
         out.append(item)
 
-    # Extra train-side debug: summarize what we got from the train station
-    if station == TRAIN_STATION and DEBUG_TRAINS:
-        print(f"[DEBUG] Train results from '{station}': {len(out)} departures")
-        for e in out[:DEBUG_TRAIN_LIMIT_PRINT]:
-            print(f"[DEBUG]  {e['time']}  {e['cat']:<3} {e['line']:<6} → {e['to']}  delay:+{e['delay']}")
     return out
 
 def fetch_mixed_departures(bus_station, train_station, limit):
     # Fetch bus and train lists independently and then merge-sort by departure time
     bus = fetch_departures(bus_station, limit)
     trains = fetch_departures(train_station, limit)
-    if DEBUG_TRAINS:
-        print(f"[DEBUG] Buses fetched: {len(bus)}  from '{bus_station}'")
-        print(f"[DEBUG] Trains fetched: {len(trains)} from '{train_station}'")
     merged = sorted(trains + bus, key=lambda e: e.get("_epoch", float("inf")))
     # Trim to limit and drop helper keys
     trimmed = []
@@ -338,15 +320,15 @@ def draw_frame(entries, tick, width=None, height=None):
     title = f"Abfahrten – Solarstrasse"
     draw_text_solid(img, (12, 12), title, FONT_BIG, WHITE)
     tw, _ = text_size(d, nowtxt, FONT_MED)
-    draw_text_solid(img, (img_width-12-tw, 14), nowtxt, FONT_MED, GREY)
+    draw_text_solid(img, (img_width-12-tw, 14), nowtxt, FONT_MED, WHITE)
 
     # Column headers (Portrait)
     y = 50
     d.line((10, y, img_width-10, y), fill=GREY)
-    draw_text_solid(img, (14, 30), "Ab", FONT_MED, GREY)
-    draw_text_solid(img, (70, 30), "Linie", FONT_MED, GREY)
-    draw_text_solid(img, (120, 30), "Ziel", FONT_MED, GREY)
-    draw_text_solid(img, (img_width-50, 30), "min", FONT_MED, GREY)
+    draw_text_solid(img, (14, 30), "Ab", FONT_MED, WHITE)
+    draw_text_solid(img, (70, 30), "Linie", FONT_MED, WHITE)
+    draw_text_solid(img, (120, 30), "Ziel", FONT_MED, WHITE)
+    draw_text_solid(img, (img_width-50, 30), "min", FONT_MED, WHITE)
 
     row_h = 36  # Increased row height to prevent text overlap
     y += 12
@@ -360,7 +342,7 @@ def draw_frame(entries, tick, width=None, height=None):
         
         # Line badge
         lc = line_color(e["cat"], e["line"])
-        d.rounded_rectangle((65, y-24, 115, y+2), radius=6, fill=lc)
+        d.rounded_rectangle((65, y-24, 90, y+2), radius=6, fill=lc)
         
         # Time + delay color
         col = WHITE if e["delay"]<=0 else (ORANGE_COLOR if e["delay"]<6 else RED)
@@ -368,14 +350,16 @@ def draw_frame(entries, tick, width=None, height=None):
         if e["delay"]>0:
             draw_text_solid(img, (70, y-20), f"+{e['delay']}", FONT_MED, col)
         
-        # Destination (truncate)
+        # Destination (truncate) - display only up to first comma
         to = e["to"]
-        maxw = img_width - 120 - 50
+        if "," in to:
+            to = to.split(",", 1)[0].strip()
+        maxw = img_width - 95 - 50
         while text_width(d, to, FONT_MED) > maxw and len(to) > 1:
             to = to[:-1]
         if text_width(d, to, FONT_MED) > maxw:
             to = to[:-1] + "…"
-        draw_text_solid(img, (120, y-22), to, FONT_MED, WHITE)
+        draw_text_solid(img, (95, y-22), to, FONT_BIG, WHITE)
         
         # Countdown
         if e["mins"] == 0:
@@ -383,7 +367,7 @@ def draw_frame(entries, tick, width=None, height=None):
         else:
             sep = ":" if tick else " "
             txt = f"{e['mins']}{sep}{e['secs']:02d}"
-        draw_text_solid(img, (img_width-50, y-22), txt, FONT_BIG, WHITE)
+        draw_text_solid(img, (img_width-50, y-22), txt, FONT_MED, WHITE)
 
     return img
 
@@ -538,20 +522,6 @@ def main():
             # Draw frame using chosen render dimensions
             frame = draw_frame(entries, tick, actual_width, actual_height)
 
-            # Optional: replace first frame with a clear test pattern to validate output
-            if DRAW_TEST_PATTERN_ONCE and frame_count == 0:
-                tp = Image.new("RGB", (actual_width, actual_height))
-                td = ImageDraw.Draw(tp)
-                # Vertical color bars and a diagonal line
-                cols = [(255,0,0),(0,255,0),(0,0,255),(255,255,0),(0,255,255),(255,0,255),(255,255,255)]
-                bar_w = max(1, actual_width // len(cols))
-                for i, c in enumerate(cols):
-                    x0 = i * bar_w
-                    td.rectangle((x0, 0, min(actual_width-1, x0 + bar_w - 1), actual_height-1), fill=c)
-                td.line((0,0, actual_width-1, actual_height-1), fill=(0,0,0), width=5)
-                draw_text_solid(tp, (10,10), "TEST", FONT_BIG, (0,0,0))
-                frame = tp
-            
             if framebuffer_mode:
                 # Rotate to match landscape framebuffer if needed
                 if 'fb_is_landscape' in locals() and fb_is_landscape:
