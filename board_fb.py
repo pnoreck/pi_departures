@@ -2,6 +2,7 @@
 import os, time, mmap, fcntl, struct, requests, sys
 from datetime import datetime, timezone
 from PIL import Image, ImageDraw, ImageFont
+import numpy as np
 
 # ---------------- Config ----------------
 # City bus stop in front of the house
@@ -26,31 +27,11 @@ REFRESH_SECS = 60
 # Framebuffer device to use
 FRAMEBUFFER_DEVICE = "/dev/fb1"  # Change to /dev/fb0, /dev/fb1, etc. as needed
 
-def _load_font(size):
-    env_font = os.getenv("BOARD_FONT")
-    candidates = [
-        env_font,
-        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-    ]
-    for path in candidates:
-        if not path:
-            continue
-        try:
-            return ImageFont.truetype(path, size)
-        except Exception:
-            continue
-    try:
-        return ImageFont.load_default(), "PIL:default"
-    except Exception:
-        raise
-
-FONT_MED = _load_font(15)
-FONT_BIG = _load_font(18)
-
-USE_BYTESWAP = False  # Try with byteswap - we're close with BGR565
+FONT_MED = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSans.ttf", 15)
+FONT_BIG = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSans.ttf", 18)
 
 # Rotation direction when framebuffer is landscape: -90 (clockwise) or +90 (counter-clockwise)
-LANDSCAPE_ROTATE_DEG = 90
+LANDSCAPE_ROTATE_DEG = -90
 
 # -------------- fb ioctls ---------------
 FBIOGET_VSCREENINFO = 0x4600
@@ -73,21 +54,6 @@ def get_fbinfo(fd):
         "green_offset": green_offset, "green_length": green_length,
         "blue_offset": blue_offset, "blue_length": blue_length,
     }
-
-def get_stride_default(xres):
-    # Fallback: 2 Bytes pro Pixel
-    return xres * 2
-
-def get_stride_sysfs():
-    try:
-        # Extract fb number from device path (e.g., "/dev/fb1" -> "fb1")
-        fb_name = os.path.basename(FRAMEBUFFER_DEVICE)
-        with open(f"/sys/class/graphics/{fb_name}/stride", "r") as f:
-            return int(f.read().strip())
-    except Exception:
-        return None
-
-# -------------- helpers -----------------
 
 def clear_framebuffer(mm, xres, yres, stride):
     """Clear the entire framebuffer with black pixels"""
@@ -117,7 +83,7 @@ def draw_text_solid(img: Image.Image, position, text: str, font: ImageFont.FreeT
     w, h = int(w), int(h)
     
     # Render at 3x resolution to get better glyph shape, then threshold to remove anti-aliasing
-    scale = 1
+    scale = 3
     w_hires, h_hires = w * scale, h * scale
     mask_hires = Image.new("L", (w_hires, h_hires), 0)
     md_hires = ImageDraw.Draw(mask_hires)
@@ -137,7 +103,6 @@ def draw_text_solid(img: Image.Image, position, text: str, font: ImageFont.FreeT
     
     # Threshold to pure black/white (removes anti-aliasing gray pixels)
     # Any pixel >= 128 becomes 255 (fully opaque), < 128 becomes 0 (fully transparent)
-    import numpy as np
     mask_array = np.asarray(mask_hires, dtype=np.uint8)
     mask_array = np.where(mask_array >= 128, 255, 0).astype(np.uint8)
     mask_hires = Image.fromarray(mask_array, mode='L')
@@ -150,20 +115,20 @@ def draw_text_solid(img: Image.Image, position, text: str, font: ImageFont.FreeT
     # Paste solid color through mask for crisp edges without colored halos
     img.paste(fill, (x, y, x + w, y + h), mask)
 
-def rgb888_to_rgb565(img: Image.Image) -> bytes:
-    import numpy as np
+def image_to_rgb565_bytes(img: Image.Image) -> bytes:
+    """Convert PIL RGB image directly to RGB565 bytes without intermediate conversion"""
     arr = np.asarray(img, dtype=np.uint8)
     r = (arr[:, :, 0] >> 3).astype('uint16')
     g = (arr[:, :, 1] >> 2).astype('uint16')
     b = (arr[:, :, 2] >> 3).astype('uint16')
-
     rgb565 = (r << 11) | (g << 5) | b
     return rgb565.astype('<u2').tobytes()
+
 
 def line_color(cat, name):
     DARK_TEAL=(2,82,89)
     ORANGE=(242,147,137)
-    RED_ORANGE=(0,0,255)
+    RED_ORANGE=(255,0,0)
     LIGHT_BEIGE=(244,226,222)
     
     c = (cat or "").upper(); n = (name or "").upper()
@@ -255,6 +220,7 @@ def fetch_mixed_departures(bus_station, train_station, limit):
 # -------------- rendering ----------------
 
 def draw_frame(entries, tick, img_width=None, img_height=None):
+    """Draw frame and return PIL Image (RGB format)"""
     TEAL=(0,113,114)         # #007172 - accents/secondary
     ORANGE=(242,147,37)      # #F29325 - warnings/delays
 
@@ -346,35 +312,22 @@ def main():
         print(f"Framebuffer info: {xres}x{yres}, {bpp} bpp")
         print(f"Expected display: {DISPLAY_WIDTH}x{DISPLAY_HEIGHT}")
 
-        stride = get_stride_sysfs() or get_stride_default(xres)
-        print(f"Stride: {stride} (expected: {xres * 2})")
-
-        # Validate bpp vs stride - if stride suggests 16 bpp, trust that over reported bpp
-        inferred_bpp = (stride // xres) * 8
-        if bpp != 16:
-            print(f"Warning: bpp = {bpp} (expected 16/RGB565)")
-            if inferred_bpp == 16:
-                print(f"Note: Stride indicates {inferred_bpp} bpp - will use 16 bpp RGB565 format")
-                bpp = 16  # Override with stride-based detection
-            else:
-                print(f"Warning: Inferred bpp from stride is {inferred_bpp}, mismatch may cause display issues")
-
         # Use native framebuffer dimensions; rotate if landscape to fill screen
         fb_is_landscape = xres >= yres
         if fb_is_landscape:
-            # We'll render in rotated portrait (yres x xres) and rotate to fill fb
             actual_width, actual_height = yres, xres
             print(f"Framebuffer is landscape {xres}x{yres} → rendering {actual_width}x{actual_height} and rotating to fit")
         else:
             actual_width, actual_height = xres, yres
             print(f"Framebuffer is portrait {xres}x{yres} → rendering native size")
 
-        size = stride * yres
+        stride = xres * 2  # RGB565 = 2 bytes per pixel
+        size = xres * yres * 2  # Total size for RGB565 framebuffer
         mm = mmap.mmap(fb, length=size, flags=mmap.MAP_SHARED, prot=mmap.PROT_WRITE, offset=0)
 
         # Clear the screen on startup to remove any previous content
         clear_framebuffer(mm, xres, yres, stride)
-        time.sleep(0.1)  # Small delay to ensure clear operation completes
+        time.sleep(0.1)
     else:
         # Image output mode - use display dimensions directly
         actual_width, actual_height = DISPLAY_WIDTH, DISPLAY_HEIGHT
@@ -398,58 +351,43 @@ def main():
                     d = ImageDraw.Draw(img)
                     draw_text_solid(img, (12, 12), f"API-Fehler: {e}", FONT_MED, (220,60,60))
                     
-                    if framebuffer_mode:
-                        # Scale if needed to match framebuffer dimensions
-                        if (xres, yres) != (actual_width, actual_height):
-                            img = img.resize((xres, yres), resample=Image.LANCZOS)
-                        
-                        out_bytes = img.tobytes("raw", "RGB")
-                        # Write to framebuffer with proper stride handling
-                        for y in range(yres):
-                            mm.seek(y * stride)
-                            row_start = y * xres * 2
-                            row_end = row_start + xres * 2
-                            mm.write(out_bytes[row_start:row_end])
-                    else:
-                        # Save error image
-                        error_filename = os.path.join(output_dir, f"departure_board_error_{frame_count:04d}.png")
-                        img.save(error_filename)
-                        print(f"Saved error image: {error_filename}")
+                    # Scale if needed to match framebuffer dimensions
+                    if (xres, yres) != (actual_width, actual_height):
+                        img = img.resize((xres, yres), resample=Image.LANCZOS)
+
+                    # Convert to RGB565 bytes
+                    out_bytes = image_to_rgb565_bytes(img)
+                    # Write to framebuffer with proper stride handling
+                    for y in range(yres):
+                        mm.seek(y * stride)
+                        row_start = y * xres * 2
+                        row_end = row_start + xres * 2
+                        mm.write(out_bytes[row_start:row_end])
+
                 last = now
 
-            # Draw frame using chosen render dimensions
+            # Draw frame (returns RGB Image)
             frame = draw_frame(entries, tick, actual_width, actual_height)
 
-            if framebuffer_mode:
-                # Rotate to match landscape framebuffer if needed
-                if 'fb_is_landscape' in locals() and fb_is_landscape:
-                    # Rotate so portrait render fills landscape fb - use LANCZOS for better quality
-                    frame = frame.rotate(LANDSCAPE_ROTATE_DEG, expand=False, resample=Image.LANCZOS)
-                # Ensure exact fb size - use LANCZOS for scaling, NEAREST only if exact size match
-                if frame.size != (xres, yres):
-                    print(f"Image needed to be resized: {xres}x{yres}")
-                    frame = frame.resize((xres, yres), resample=Image.LANCZOS)
-                
-                out_bytes = rgb888_to_rgb565(frame)
-                
-                # Write to framebuffer with proper stride handling
-                for y in range(yres):
-                    mm.seek(y * stride)
-                    row_start = y * xres * 2
-                    row_end = row_start + xres * 2
-                    mm.write(out_bytes[row_start:row_end])
-                mm.flush()
-            else:
-                # Save image file
-                filename = os.path.join(output_dir, f"departure_board_{frame_count:04d}.png")
-                frame.save(filename)
-                print(f"Saved: {filename}")
-                frame_count += 1
-                
-                # Check if we've reached the maximum frame count
-                if max_frames and frame_count >= max_frames:
-                    print(f"Reached maximum frame count ({max_frames}), stopping")
-                    break
+            # Handle rotation and resizing on RGB image before converting to RGB565
+            if 'fb_is_landscape' in locals() and fb_is_landscape:
+                # Rotate so portrait render fills landscape fb - use LANCZOS for better quality
+                frame = frame.rotate(LANDSCAPE_ROTATE_DEG, expand=False, resample=Image.LANCZOS)
+            # Ensure exact fb size - use LANCZOS for scaling, NEAREST only if exact size match
+            if frame.size != (xres, yres):
+                print(f"Image needed to be resized: {xres}x{yres}")
+                frame = frame.resize((xres, yres), resample=Image.LANCZOS)
+
+            # Convert to RGB565 bytes (only one conversion, after all transformations)
+            out_bytes = image_to_rgb565_bytes(frame)
+
+            # Write to framebuffer with proper stride handling
+            for y in range(yres):
+                mm.seek(y * stride)
+                row_start = y * xres * 2
+                row_end = row_start + xres * 2
+                mm.write(out_bytes[row_start:row_end])
+            mm.flush()
 
             tick = not tick
             time.sleep(1)
