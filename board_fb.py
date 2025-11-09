@@ -44,11 +44,9 @@ def _load_font(size):
     except Exception:
         raise
 
-FONT_REG = _load_font(12)
 FONT_MED = _load_font(15)
 FONT_BIG = _load_font(18)
 
-BGR565 = False
 USE_BYTESWAP = False  # Try with byteswap - we're close with BGR565
 
 # Rotation direction when framebuffer is landscape: -90 (clockwise) or +90 (counter-clockwise)
@@ -158,15 +156,9 @@ def rgb888_to_rgb565(img: Image.Image) -> bytes:
     r = (arr[:, :, 0] >> 3).astype('uint16')
     g = (arr[:, :, 1] >> 2).astype('uint16')
     b = (arr[:, :, 2] >> 3).astype('uint16')
-    if BGR565:
-        rgb565 = (b << 11) | (g << 5) | r
-    else:
-        rgb565 = (r << 11) | (g << 5) | b
-    # Framebuffer byte order - configurable via USE_BYTESWAP
-    if USE_BYTESWAP:
-        return rgb565.byteswap().tobytes()  # Big-endian
-    else:
-        return rgb565.astype('<u2').tobytes()  # Little-endian (native)
+
+    rgb565 = (r << 11) | (g << 5) | b
+    return rgb565.astype('<u2').tobytes()
 
 def line_color(cat, name):
     DARK_TEAL=(2,82,89)
@@ -338,40 +330,25 @@ def draw_frame(entries, tick, img_width=None, img_height=None):
 def main():
     # Parse command line arguments
     max_frames = None
-    if len(sys.argv) > 1 and sys.argv[1] == "--frames" and len(sys.argv) > 2:
-        try:
-            max_frames = int(sys.argv[2])
-            print(f"Will generate maximum {max_frames} frames")
-        except ValueError:
-            print("Invalid frame count, ignoring --frames argument")
-    
+
     try:
         fb = os.open(FRAMEBUFFER_DEVICE, os.O_RDWR)
         framebuffer_mode = True
         print(f"Running in framebuffer mode ({FRAMEBUFFER_DEVICE})")
     except FileNotFoundError:
         framebuffer_mode = False
-        print(f"Framebuffer device {FRAMEBUFFER_DEVICE} not found - running in image output mode")
-        
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        output_dir = script_dir  # Save images in the same directory as the script
-        print(f"Images will be saved in: {output_dir}")
-        print("Images will be saved as 'departure_board_*.png'")
-        if max_frames:
-            print(f"Will stop after {max_frames} frames")
-    
+
     if framebuffer_mode:
-        global BGR565, USE_BYTESWAP
 
         info = get_fbinfo(fb)
         xres, yres, bpp = info["xres"], info["yres"], info["bpp"]
-        
+
         print(f"Framebuffer info: {xres}x{yres}, {bpp} bpp")
         print(f"Expected display: {DISPLAY_WIDTH}x{DISPLAY_HEIGHT}")
 
         stride = get_stride_sysfs() or get_stride_default(xres)
         print(f"Stride: {stride} (expected: {xres * 2})")
-        
+
         # Validate bpp vs stride - if stride suggests 16 bpp, trust that over reported bpp
         inferred_bpp = (stride // xres) * 8
         if bpp != 16:
@@ -391,7 +368,7 @@ def main():
         else:
             actual_width, actual_height = xres, yres
             print(f"Framebuffer is portrait {xres}x{yres} → rendering native size")
-        
+
         size = stride * yres
         mm = mmap.mmap(fb, length=size, flags=mmap.MAP_SHARED, prot=mmap.PROT_WRITE, offset=0)
 
@@ -419,14 +396,14 @@ def main():
                     print(f"API Error: {e}")
                     img = Image.new("RGB", (actual_width, actual_height), (0,0,0))
                     d = ImageDraw.Draw(img)
-                    draw_text_solid(img, (12, 12), f"API-Fehler: {e}", FONT_REG, (220,60,60))
+                    draw_text_solid(img, (12, 12), f"API-Fehler: {e}", FONT_MED, (220,60,60))
                     
                     if framebuffer_mode:
                         # Scale if needed to match framebuffer dimensions
                         if (xres, yres) != (actual_width, actual_height):
                             img = img.resize((xres, yres), resample=Image.LANCZOS)
                         
-                        out_bytes = rgb888_to_rgb565(img)
+                        out_bytes = img.tobytes("raw", "RGB")
                         # Write to framebuffer with proper stride handling
                         for y in range(yres):
                             mm.seek(y * stride)
