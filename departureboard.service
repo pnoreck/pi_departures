@@ -5,7 +5,16 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=pi
+User=sha
+Group=sha
+Type=simple
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=pi_departures
+TimeoutSec=10
+KillMode=process
+KillSignal=SIGINT
+SendSIGKILL=no
 WorkingDirectory=/home/sha/pi_departures
 ExecStart=/usr/bin/python3 /home/sha/pi_departures/board_fb.py
 Restart=always
