@@ -28,7 +28,7 @@ REFRESH_SECS = 60
 FRAMEBUFFER_DEVICE = "/dev/fb1"  # Change to /dev/fb0, /dev/fb1, etc. as needed
 
 FONT_MED = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSans.ttf", 15)
-FONT_BIG = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSans.ttf", 18)
+FONT_BIG = ImageFont.truetype("/usr/share/fonts/truetype/freefont/FreeSans.ttf", 20)
 
 # Rotation direction when framebuffer is landscape: -90 (clockwise) or +90 (counter-clockwise)
 LANDSCAPE_ROTATE_DEG = -90
@@ -127,22 +127,18 @@ def image_to_rgb565_bytes(img: Image.Image) -> bytes:
 
 def line_color(cat, name):
     DARK_TEAL=(2,82,89)
-    ORANGE=(242,147,137)
+    SBB_BLUE=(22,8,185)
     RED_ORANGE=(255,0,0)
-    LIGHT_BEIGE=(244,226,222)
-    
+
     c = (cat or "").upper(); n = (name or "").upper()
 
     # S-Bahn - use orange
-    if c.startswith("S") or n.startswith("S"): return ORANGE
+    if c.startswith("S") or n.startswith("S"): return SBB_BLUE
 
     # Bus/Nachtbus - use red-orange
     if c in ("BUS","N","SN") or (n and n[0].isdigit()):
         return RED_ORANGE
 
-    # Fernverkehr - use light beige
-    if c in ("IC","IR","RE","RJ","RJX","EN"): return LIGHT_BEIGE
-    
     # Default - use dark teal
     return DARK_TEAL
 
@@ -221,15 +217,12 @@ def fetch_mixed_departures(bus_station, train_station, limit):
 
 def draw_frame(entries, tick, img_width=None, img_height=None):
     """Draw frame and return PIL Image (RGB format)"""
-    TEAL=(0,113,114)         # #007172 - accents/secondary
-    ORANGE=(242,147,37)      # #F29325 - warnings/delays
-
     # Map to semantic names
-    BLACK=(0,0,0)             # Background
-    WHITE=(255,255,255)       # Primary text
-    GREY=TEAL                 # Secondary text
-    DARKBG=TEAL               # Alternating rows (darker)
-    ORANGE_COLOR=ORANGE       # Delays < 6 min
+    BLACK=(0,0,0)            # Background
+    WHITE=(255,255,255)      # Primary text
+    GREY=(40,40,40)          # Secondary text
+    DARKBG=(20,20,20)     # Alternating rows (darker)
+    ORANGE=(255,125,0) # Delays < 6 min
     RED=(255,0,0)            # Delays >= 6 min
 
     img = Image.new("RGB", (img_width, img_height), BLACK)
@@ -262,28 +255,37 @@ def draw_frame(entries, tick, img_width=None, img_height=None):
         
         # Line badge
         lc = line_color(e["cat"], e["line"])
-        d.rounded_rectangle((65, y-24, 90, y+2), radius=6, fill=lc)
-        
+        d.rounded_rectangle((65, y-24, 95, y+2), radius=6, fill=lc)
+
         # Time + delay color
-        col = WHITE if e["delay"]<=0 else (ORANGE_COLOR if e["delay"]<6 else RED)
+        col = WHITE if e["delay"]<=0 else (ORANGE if e["delay"]<6 else RED)
         draw_text_solid(img, (12, y-22), e["time"], FONT_BIG, col)
         if e["delay"]>0:
-            draw_text_solid(img, (70, y-20), f"+{e['delay']}", FONT_MED, col)
+            draw_text_solid(img, (68, y-17), f"+{e['delay']}", FONT_MED, WHITE)
         
         # Destination (truncate) - display only up to first comma
         to = e["to"]
         if "," in to:
             to = to.split(",", 1)[0].strip()
-        maxw = img_width - 95 - 50
+
+        if "Winterthur " in to and len(to) > len("Winterthur"):
+            to = to.replace("Winterthur ", "")
+
+        if to == "Winterthur":
+            to += " HB"
+
+        maxw = img_width - 95 - 70
         while text_width(d, to, FONT_MED) > maxw and len(to) > 1:
             to = to[:-1]
         if text_width(d, to, FONT_MED) > maxw:
             to = to[:-1] + "…"
-        draw_text_solid(img, (95, y-22), to, FONT_BIG, WHITE)
+        draw_text_solid(img, (100, y-22), to, FONT_BIG, WHITE)
         
         # Countdown
         if e["mins"] == 0:
             txt = "now" if tick else f"{e['secs']:02d}s"
+        elif e["mins"] >= 100:
+            txt = ""
         else:
             sep = ":" if tick else " "
             txt = f"{e['mins']}{sep}{e['secs']:02d}"
