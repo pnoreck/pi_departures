@@ -41,18 +41,8 @@ def get_fbinfo(fd):
     fcntl.ioctl(fd, FBIOGET_VSCREENINFO, buf, True)
     xres, yres = struct.unpack_from("<II", buf, 0)
     bpp = struct.unpack_from("<I", buf, 32)[0]
-    # Read color format offsets and lengths (at offsets 36, 40, 44, 48, 52, 56, 60, 64)
-    red_offset = struct.unpack_from("<I", buf, 36)[0]
-    red_length = struct.unpack_from("<I", buf, 40)[0]
-    green_offset = struct.unpack_from("<I", buf, 44)[0]
-    green_length = struct.unpack_from("<I", buf, 48)[0]
-    blue_offset = struct.unpack_from("<I", buf, 52)[0]
-    blue_length = struct.unpack_from("<I", buf, 56)[0]
     return {
         "xres": xres, "yres": yres, "bpp": bpp,
-        "red_offset": red_offset, "red_length": red_length,
-        "green_offset": green_offset, "green_length": green_length,
-        "blue_offset": blue_offset, "blue_length": blue_length,
     }
 
 def clear_framebuffer(mm, xres, yres, stride):
